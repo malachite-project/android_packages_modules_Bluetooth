@@ -4740,6 +4740,15 @@ public:
         setConfigurationContextType(context_type);
         group->SetConfigurationContextType(context_type);
       }
+      // The software codec is set up from these, so they must follow the
+      // group's configuration even when no reconfiguration is needed.
+      // Otherwise they keep the previous context's settings: after LE Audio
+      // is turned off and on, UNSPEC's 48 kHz stays in the encoder while the
+      // ASEs stream LIVE at 32 kHz, and the remote decodes garbage.
+      current_decoder_config_ = group->GetAudioSessionCodecConfigForDirection(
+              context_type, bluetooth::le_audio::types::kLeAudioDirectionSource);
+      current_encoder_config_ = group->GetAudioSessionCodecConfigForDirection(
+              context_type, bluetooth::le_audio::types::kLeAudioDirectionSink);
       return AudioReconfigurationResult::RECONFIGURATION_NOT_NEEDED;
     }
 
