@@ -11863,6 +11863,83 @@ TEST_F(UnicastTest, MicrophoneAttachToCurrentMediaScenario) {
   Mock::VerifyAndClearExpectations(mock_le_audio_source_hal_client_);
 }
 
+TEST_F(UnicastTest, EncoderConfigFollowsGroupConfigurationWhenReconfigurationNotNeeded) {
+  /* Scenario (LE Audio switched off and on in the device settings):
+   * 1. Stream a VoIP call, so the group gets configured for CONVERSATIONAL
+   * 2. Make the group inactive and active again. Activation prepares the audio sessions for the
+   *    default context and updates the codec configs, but the group stays configured for
+   *    CONVERSATIONAL
+   * 3. Stream the VoIP call again. No reconfiguration is needed, and the encoders must be set up
+   *    with the CONVERSATIONAL configuration, not with the one prepared on activation
+   */
+  int group_id = 2;
+  TestSetupRemoteDevices(group_id);
+  SyncOnMainLoop();
+
+  std::vector<LeAudioCodecConfiguration> encoder_configs;
+  MockCodecInterface::RegisterMockInstanceHook([&](MockCodecInterface* mock, bool is_destroyed) {
+    if (is_destroyed) {
+      return;
+    }
+    ON_CALL(*mock, InitEncoder(_, _))
+            .WillByDefault([&](const LeAudioCodecConfiguration& /*pcm_config*/,
+                               const LeAudioCodecConfiguration& codec_config) {
+              encoder_configs.push_back(codec_config);
+              return CodecInterface::Status::STATUS_OK;
+            });
+  });
+
+  EXPECT_CALL(mock_state_machine_,
+              StartStream(_, types::LeAudioContextType::CONVERSATIONAL, _, _))
+          .Times(AtLeast(1));
+  StartStreaming(AUDIO_USAGE_VOICE_COMMUNICATION, AUDIO_CONTENT_TYPE_SPEECH, group_id);
+  SyncOnMainLoop();
+  Mock::VerifyAndClearExpectations(&mock_state_machine_);
+  ASSERT_FALSE(encoder_configs.empty());
+
+  StopStreaming(group_id, true);
+  SyncOnMainLoop();
+
+  log::info("Deactivate and activate the group again");
+  LeAudioClient::Get()->GroupSetActive(bluetooth::groups::kGroupUnknown);
+  SyncOnMainLoop();
+
+  // Re-initialize mock for destroyed hal client
+  RegisterSourceHalClientMock();
+  RegisterSinkHalClientMock();
+
+  EXPECT_CALL(*mock_le_audio_source_hal_client_, Start(_, _, _)).Times(1);
+  EXPECT_CALL(*mock_le_audio_sink_hal_client_, Start(_, _, _)).Times(1);
+  do_in_main_thread(base::BindOnce(&LeAudioClient::GroupSetActive,
+                                   base::Unretained(LeAudioClient::Get()), group_id));
+  SyncOnMainLoop();
+  Mock::VerifyAndClearExpectations(mock_le_audio_source_hal_client_);
+  Mock::VerifyAndClearExpectations(mock_le_audio_sink_hal_client_);
+
+  log::info("Stream the VoIP call again, the group is still configured for it");
+  encoder_configs.clear();
+  EXPECT_CALL(mock_state_machine_,
+              StartStream(_, types::LeAudioContextType::CONVERSATIONAL, _, _))
+          .Times(AtLeast(1));
+  StartStreaming(AUDIO_USAGE_VOICE_COMMUNICATION, AUDIO_CONTENT_TYPE_SPEECH, group_id);
+  SyncOnMainLoop();
+  Mock::VerifyAndClearExpectations(&mock_state_machine_);
+
+  ASSERT_NE(0lu, streaming_groups.count(group_id));
+  auto group = streaming_groups.at(group_id);
+  ASSERT_EQ(group->GetConfigurationContextType(), types::LeAudioContextType::CONVERSATIONAL);
+  const LeAudioCodecConfiguration expected_encoder_config =
+          group->GetAudioSessionCodecConfigForDirection(
+                  types::LeAudioContextType::CONVERSATIONAL,
+                  bluetooth::le_audio::types::kLeAudioDirectionSink);
+  ASSERT_FALSE(expected_encoder_config.IsInvalid());
+
+  ASSERT_FALSE(encoder_configs.empty());
+  for (auto const& config : encoder_configs) {
+    ASSERT_EQ(config, expected_encoder_config);
+  }
+}
+
 TEST_F(UnicastTest, SwitchBetweenMicrophoneAndSoundEffectScenario) {
   const RawAddress test_address0 = GetTestAddress(0);
   int group_id = bluetooth::groups::kGroupUnknown;
