@@ -18420,6 +18420,86 @@ TEST_F(UnicastTest, TestForAudioHalWhichDoesNotSetEmptyMetadata_FallbackToMedia)
   ASSERT_EQ(get_alarm_cancel_call_count("LeAudioCloseVbcTimeout"), 1);
 }
 
+TEST_F(UnicastTest, TestForAudioHalWhichDoesNotSetEmptyMetadata_InputProbe) {
+  /* Scenario
+   * 1. Make device active
+   * 2. Audio policy probes the input: the simulated Audio HAL sets metadata for the decoding
+   *    session and suspends it right away, without clearing the metadata
+   * 3. The suspend restarts the VBC close timeout, which must keep the pending Audio HAL check
+   * 4. After the timeout BT Stack sets `audio_hal_is_capable_to_send_empty_metadata_` to false
+   *    and drops the stale metadata
+   * 5. Check that media is then streamed as MEDIA, without the decoding direction
+   */
+  int group_id = 1;
+  TestSetupRemoteDevices(group_id);
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 0);
+  ASSERT_EQ(get_alarm_cancel_call_count("LeAudioCloseVbcTimeout"), 0);
+
+  UpdateLocalSinkMetadata(AUDIO_SOURCE_MIC);
+  SyncOnMainLoop();
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 1);
+  ASSERT_EQ(get_alarm_cancel_call_count("LeAudioCloseVbcTimeout"), 0);
+
+  LocalAudioSinkSuspend();
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 2);
+  ASSERT_EQ(get_alarm_cancel_call_count("LeAudioCloseVbcTimeout"), 1);
+
+  // simulate VBC close timeout passed, alarm executing
+  fake_osi_alarm_expired(fake_osi_alarm_set_on_mloop_);
+
+  auto scenario = types::LeAudioContextType::MEDIA;
+  types::BidirectionalPair<types::AudioContexts> metadata_contexts = {
+          .sink = AudioContexts(types::LeAudioContextType::MEDIA), .source = AudioContexts()};
+  EXPECT_CALL(mock_state_machine_, StartStream(_, scenario, metadata_contexts, _)).Times(1);
+
+  UpdateLocalSourceMetadata(AUDIO_USAGE_MEDIA, AUDIO_CONTENT_TYPE_UNKNOWN);
+  LocalAudioSourceResume();
+  SyncOnMainLoop();
+  Mock::VerifyAndClearExpectations(&mock_state_machine_);
+
+  uint8_t cis_count_out = 2;
+  uint8_t cis_count_in = 0;
+  TestAudioDataTransfer(group_id, cis_count_out, cis_count_in, 1920, 0);
+  SyncOnMainLoop();
+
+  auto group = streaming_groups.at(group_id);
+  auto cis_directions = group->cig.GetConnectedCisDirections();
+  ASSERT_TRUE(cis_directions.sink);
+  ASSERT_FALSE(cis_directions.source);
+}
+
+TEST_F(UnicastTest, TestForAudioHalWhichSetsEmptyMetadata_InputProbe) {
+  /* Scenario
+   * 1. Make device active
+   * 2. Audio policy probes the input: the simulated Audio HAL sets metadata for the decoding
+   *    session, suspends it and then clears the metadata
+   * 3. The VBC close timeout fires
+   * 4. Check that the Audio HAL is still considered capable of sending empty metadata: new
+   *    decoding metadata does not start the VBC close timeout
+   */
+  int group_id = 1;
+  TestSetupRemoteDevices(group_id);
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 0);
+
+  UpdateLocalSinkMetadata(AUDIO_SOURCE_MIC);
+  SyncOnMainLoop();
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 1);
+
+  LocalAudioSinkSuspend();
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 2);
+
+  UpdateLocalSinkEmptyMetadata();
+  SyncOnMainLoop();
+
+  // simulate VBC close timeout passed, alarm executing
+  fake_osi_alarm_expired(fake_osi_alarm_set_on_mloop_);
+  SyncOnMainLoop();
+
+  UpdateLocalSinkMetadata(AUDIO_SOURCE_MIC);
+  SyncOnMainLoop();
+  ASSERT_EQ(get_alarm_set_on_mloop_call_count("LeAudioCloseVbcTimeout"), 2);
+}
+
 TEST_F(UnicastTest, testAccessibilityUsage) {
   /* Scenario
    * 1. Start Media stream
