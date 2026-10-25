@@ -2158,6 +2158,84 @@ TEST_F(StateMachineTest, testConfigureQosSingleRecoverCig) {
   ASSERT_EQ(0, get_func_call_count("alarm_cancel"));
 }
 
+TEST_F(StateMachineTest, testConfigureQosSingleCigRejectedRetrySymmetricPhy) {
+  /* The controller rejects LE Set CIG Parameters for a unidirectional CIG with an asymmetric
+   * PHY with Invalid HCI Command Parameters (0x12). Expect one retry with a symmetric PHY, and
+   * when that is rejected too, the stream is stopped without another CIG attempt.
+   */
+  const auto context_type = kContextTypeRingtone;
+  const int leaudio_group_id = 3;
+
+  // Prepare fake connected device group
+  auto* group = PrepareSingleTestDeviceGroup(leaudio_group_id, context_type);
+
+  /* Since we prepared device with Ringtone context in mind, only one ASE
+   * should have been configured.
+   */
+  auto* leAudioDevice = group->GetFirstDevice();
+  PrepareConfigureCodecHandler(group, 1);
+
+  // Let the test inject the CIG creation result
+  std::vector<bluetooth::hci::iso_manager::cig_create_params> cig_params;
+  ON_CALL(*mock_iso_manager_, CreateCig)
+          .WillByDefault([&cig_params](uint8_t /*cig_id*/,
+                                       bluetooth::hci::iso_manager::cig_create_params p) {
+            cig_params.push_back(p);
+          });
+
+  EXPECT_CALL(gatt_queue,
+              WriteCharacteristic(leAudioDevice->conn_id_, leAudioDevice->ctp_hdls_.val_hdl, _,
+                                  GATT_WRITE_NO_RSP, _, _))
+          .Times(AtLeast(1));
+
+  EXPECT_CALL(*mock_iso_manager_, CreateCig(_, _)).Times(2);
+  EXPECT_CALL(*mock_iso_manager_, RemoveCig(_, _)).Times(0);
+  EXPECT_CALL(*mock_iso_manager_, EstablishCis(_)).Times(0);
+  EXPECT_CALL(*mock_iso_manager_, SetupIsoDataPath(_, _)).Times(0);
+
+  InjectInitialIdleNotification(group);
+
+  ASSERT_TRUE(LeAudioGroupStateMachine::Get()->StartStream(
+          group, context_type,
+          {.sink = types::AudioContexts(context_type),
+           .source = types::AudioContexts(context_type)}));
+
+  ASSERT_EQ(group->GetState(), types::AseState::BTA_LE_AUDIO_ASE_STATE_CODEC_CONFIGURED);
+  ASSERT_EQ(group->cig.GetState(), types::CigState::CREATING);
+
+  // First attempt: unidirectional CIG with the 1M PHY for the unused direction
+  ASSERT_EQ(cig_params.size(), 1lu);
+  ASSERT_EQ(cig_params.at(0).sdu_itv_stom, 0lu);
+  ASSERT_TRUE(group->asymmetric_phy_for_unidirectional_cis_supported);
+  ASSERT_NE(cig_params.at(0).cis_cfgs.size(), 0lu);
+  for (auto const& cfg : cig_params.at(0).cis_cfgs) {
+    ASSERT_EQ(cfg.phy_stom, bluetooth::hci::kIsoCigPhy1M);
+  }
+  const auto symmetric_phy_stom =
+          group->GetPhyBitmask(bluetooth::le_audio::types::kLeAudioDirectionSource);
+
+  LeAudioGroupStateMachine::Get()->ProcessHciNotifOnCigCreate(
+          group, HCI_ERR_ILLEGAL_PARAMETER_FMT, leaudio_group_id, {});
+
+  // Second attempt: the PHY is no longer forced to 1M
+  ASSERT_EQ(cig_params.size(), 2lu);
+  ASSERT_FALSE(group->asymmetric_phy_for_unidirectional_cis_supported);
+  ASSERT_EQ(group->cig.GetState(), types::CigState::CREATING);
+  for (auto const& cfg : cig_params.at(1).cis_cfgs) {
+    ASSERT_EQ(cfg.phy_stom, symmetric_phy_stom);
+  }
+
+  // Rejected again: no further attempt, the CIG is left unset
+  LeAudioGroupStateMachine::Get()->ProcessHciNotifOnCigCreate(
+          group, HCI_ERR_ILLEGAL_PARAMETER_FMT, leaudio_group_id, {});
+
+  ASSERT_EQ(cig_params.size(), 2lu);
+  ASSERT_EQ(group->cig.GetState(), types::CigState::NONE);
+  ASSERT_EQ(group->GetTargetState(), types::AseState::BTA_LE_AUDIO_ASE_STATE_IDLE);
+
+  testing::Mock::VerifyAndClearExpectations(mock_iso_manager_);
+}
+
 TEST_F(StateMachineTest, testConfigureQosMultiple) {
   const auto context_type = kContextTypeMedia;
   const auto leaudio_group_id = 3;
