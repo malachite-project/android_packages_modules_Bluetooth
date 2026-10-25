@@ -513,27 +513,39 @@ public:
   }
 
   void StartVbcCloseTimeout(bool audio_hal_check_in_progress = false) {
+    /* Restarting the timer must not drop a pending Audio HAL check. Audio policy probes the
+     * input at connection: the probe's sink metadata arms the check, and its suspend a few ms
+     * later restarts the timer. Without this the check never completes and the probe's
+     * metadata is never cleared on an Audio HAL which does not send empty metadata.
+     * The check stays pending until the timer fires, is stopped, or the Audio HAL sends empty
+     * metadata.
+     */
+    audio_hal_check_in_progress |= vbc_hal_check_pending_;
     if (alarm_is_scheduled(close_vbc_timeout_)) {
       StopVbcCloseTimeout();
     }
+    vbc_hal_check_pending_ = audio_hal_check_in_progress;
 
     static const uint64_t timeoutMs = 2000;
-    log::debug("Start VBC close timeout with {} ms", timeoutMs);
+    log::debug("Start VBC close timeout with {} ms, audio_hal_check_in_progress: {}", timeoutMs,
+               audio_hal_check_in_progress);
 
     alarm_set_on_mloop(
             close_vbc_timeout_, timeoutMs,
-            [](void* data) {
+            [](void* /*data*/) {
               if (instance) {
-                bool audio_hal_check_in_progress = (PTR_TO_INT(data) != 0);
+                bool audio_hal_check_in_progress = instance->vbc_hal_check_pending_;
+                instance->vbc_hal_check_pending_ = false;
                 log::debug("Reconfigure after VBC close: audio_hal_check_in_progress: {}",
                            audio_hal_check_in_progress);
                 instance->ReconfigureAfterVbcClose(audio_hal_check_in_progress);
               }
             },
-            INT_TO_PTR(audio_hal_check_in_progress));
+            nullptr);
   }
 
   void StopVbcCloseTimeout() {
+    vbc_hal_check_pending_ = false;
     if (alarm_is_scheduled(close_vbc_timeout_)) {
       log::debug("Cancel VBC close timeout");
       alarm_cancel(close_vbc_timeout_);
@@ -5927,6 +5939,8 @@ public:
          */
 
         if (sink_metadata.empty()) {
+          /* This also answers a pending check */
+          vbc_hal_check_pending_ = false;
           audio_hal_check_completed_ = true;
           audio_hal_is_capable_to_send_empty_metadata_ = true;
           return;
@@ -7317,6 +7331,9 @@ private:
 
   /* Assume that  Audio HAL can send empty metadata when tracks are closed */
   bool audio_hal_is_capable_to_send_empty_metadata_ = true;
+
+  /* Audio HAL check is waiting for the VBC close timeout */
+  bool vbc_hal_check_pending_ = false;
 
   void ClientAudioInterfaceRelease() {
     auto group = aseGroups_.FindById(active_group_id_);
