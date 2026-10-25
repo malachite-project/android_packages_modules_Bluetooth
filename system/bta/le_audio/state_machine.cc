@@ -703,8 +703,29 @@ public:
       }
 
       group->cig.SetState(CigState::NONE);
+
+      if (status == HCI_ERR_ILLEGAL_PARAMETER_FMT &&
+          group->asymmetric_phy_for_unidirectional_cis_supported == true &&
+          group->GetSduInterval(bluetooth::le_audio::types::kLeAudioDirectionSource) == 0) {
+        /* Some controllers reject a unidirectional CIG with an asymmetric PHY already in
+         * LE Set CIG Parameters. Retry once with a symmetric PHY, as for a CIS which fails
+         * with Unsupported Remote Feature. The flag stays cleared, so this is not retried.
+         */
+        log::info("Controller rejected the CIG with asymmetric PHY, retry with symmetric PHY");
+        group->asymmetric_phy_for_unidirectional_cis_supported = false;
+        if (CigCreate(group)) {
+          return;
+        }
+      }
+
       log::error(", failed to create CIG, reason: 0x{:02x}, new cig state: {}", status,
                  ToString(group->cig.GetState()));
+      /* Count it like a CIS failure. Otherwise a controller which keeps rejecting the CIG
+       * never reaches the health based fallback, and the Audio HAL restarts the stream
+       * for as long as it plays.
+       */
+      notifyLeAudioHealth(group,
+                          bluetooth::le_audio::LeAudioHealthGroupStatType::STREAM_CREATE_CIS_FAILED);
       state_machine_callbacks_->OnStateMachineInvalidStatusCb(
               group->group_id_, StateMachineInvalidStatus::FAILED_TO_CREATE_CIG);
       return;
