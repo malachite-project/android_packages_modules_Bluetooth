@@ -2726,11 +2726,13 @@ TEST_F(StateMachineTest, testConfigureQosSingleCigRejectedRetrySymmetricPhy) {
 
   // First attempt: unidirectional CIG with the 1M PHY for the unused direction
   ASSERT_EQ(cig_params.size(), 1lu);
-  ASSERT_EQ(cig_params.at(0).sdu_itv_stom, 0lu);
+  ASSERT_EQ(cig_params.at(0).sdu_itv_p_to_c, 0lu);
+  ASSERT_EQ(cig_params.at(0).max_trans_lat_p_to_c, types::kMaxTransportLatencyMin);
   ASSERT_TRUE(group->asymmetric_phy_for_unidirectional_cis_supported);
+  ASSERT_FALSE(group->cig_fill_unused_direction);
   ASSERT_NE(cig_params.at(0).cis_cfgs.size(), 0lu);
   for (auto const& cfg : cig_params.at(0).cis_cfgs) {
-    ASSERT_EQ(cfg.phy_stom, bluetooth::hci::kIsoCigPhy1M);
+    ASSERT_EQ(cfg.phy_p_to_c, bluetooth::hci::kIsoCigPhy1M);
   }
   const auto symmetric_phy_stom =
           group->GetPhyBitmask(bluetooth::le_audio::types::kLeAudioDirectionSource);
@@ -2738,12 +2740,18 @@ TEST_F(StateMachineTest, testConfigureQosSingleCigRejectedRetrySymmetricPhy) {
   LeAudioGroupStateMachine::Get()->ProcessHciNotifOnCigCreate(
           group, HCI_ERR_ILLEGAL_PARAMETER_FMT, leaudio_group_id, {});
 
-  // Second attempt: the PHY is no longer forced to 1M
+  // Second attempt: the PHY is no longer forced to 1M, and the unused direction carries the
+  // used one's interval and latency, with no SDU
   ASSERT_EQ(cig_params.size(), 2lu);
   ASSERT_FALSE(group->asymmetric_phy_for_unidirectional_cis_supported);
+  ASSERT_TRUE(group->cig_fill_unused_direction);
   ASSERT_EQ(group->cig.GetState(), types::CigState::CREATING);
+  ASSERT_NE(cig_params.at(1).sdu_itv_c_to_p, 0lu);
+  ASSERT_EQ(cig_params.at(1).sdu_itv_p_to_c, cig_params.at(1).sdu_itv_c_to_p);
+  ASSERT_EQ(cig_params.at(1).max_trans_lat_p_to_c, cig_params.at(1).max_trans_lat_c_to_p);
   for (auto const& cfg : cig_params.at(1).cis_cfgs) {
-    ASSERT_EQ(cfg.phy_stom, symmetric_phy_stom);
+    ASSERT_EQ(cfg.phy_p_to_c, symmetric_phy_stom);
+    ASSERT_EQ(cfg.max_sdu_size_p_to_c, 0);
   }
 
   // Rejected again: no further attempt, the CIG is left unset

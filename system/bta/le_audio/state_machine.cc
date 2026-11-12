@@ -704,15 +704,22 @@ public:
 
       group->cig.SetState(CigState::NONE);
 
-      if (status == HCI_ERR_ILLEGAL_PARAMETER_FMT &&
-          group->asymmetric_phy_for_unidirectional_cis_supported == true &&
-          group->GetSduInterval(bluetooth::le_audio::types::kLeAudioDirectionSource) == 0) {
-        /* Some controllers reject a unidirectional CIG with an asymmetric PHY already in
-         * LE Set CIG Parameters. Retry once with a symmetric PHY, as for a CIS which fails
-         * with Unsupported Remote Feature. The flag stays cleared, so this is not retried.
+      bool unidirectional =
+              group->GetSduInterval(bluetooth::le_audio::types::kLeAudioDirectionSink) == 0 ||
+              group->GetSduInterval(bluetooth::le_audio::types::kLeAudioDirectionSource) == 0;
+      if (status == HCI_ERR_ILLEGAL_PARAMETER_FMT && unidirectional &&
+          (group->asymmetric_phy_for_unidirectional_cis_supported ||
+           !group->cig_fill_unused_direction)) {
+        /* Some controllers reject a unidirectional CIG already in LE Set CIG Parameters.
+         * The command allows an SDU interval only from 0x0000FF us, but the stack marks the
+         * unused direction with 0, and it may also ask for an asymmetric PHY. Retry once
+         * with a symmetric PHY and the used direction's interval and latency for the unused
+         * one, whose Max_SDU stays 0. Both settings stay for this group, so this happens once.
          */
-        log::info("Controller rejected the CIG with asymmetric PHY, retry with symmetric PHY");
+        log::info("Controller rejected the unidirectional CIG, retry with symmetric PHY and the "
+                  "unused direction filled in");
         group->asymmetric_phy_for_unidirectional_cis_supported = false;
+        group->cig_fill_unused_direction = true;
         if (CigCreate(group)) {
           return;
         }
@@ -1968,6 +1975,19 @@ private:
     };
 
     ApplyDsaParams(group, param);
+
+    if (group->cig_fill_unused_direction) {
+      if (param.sdu_itv_p_to_c == 0) {
+        param.sdu_itv_p_to_c = param.sdu_itv_c_to_p;
+        param.max_trans_lat_p_to_c = param.max_trans_lat_c_to_p;
+      } else if (param.sdu_itv_c_to_p == 0) {
+        param.sdu_itv_c_to_p = param.sdu_itv_p_to_c;
+        param.max_trans_lat_c_to_p = param.max_trans_lat_p_to_c;
+      }
+      log::info("Unused CIG direction filled in: sdu_itv c_to_p {} p_to_c {}, latency {} {}",
+                param.sdu_itv_c_to_p, param.sdu_itv_p_to_c, param.max_trans_lat_c_to_p,
+                param.max_trans_lat_p_to_c);
+    }
 
     log_history_->AddLogHistory(kLogStateMachineTag, group->group_id_, RawAddress::kEmpty,
                                 kLogCigCreateOp + "#CIS: " + std::to_string(param.cis_cfgs.size()));

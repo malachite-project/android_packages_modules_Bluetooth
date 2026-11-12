@@ -111,6 +111,9 @@ public:
     bool active;
   } dsa_;
   bool asymmetric_phy_for_unidirectional_cis_supported;
+  /* Set after the controller rejected a unidirectional CIG: give the unused direction the
+   * used one's SDU interval and transport latency instead of 0 and the minimum. */
+  bool cig_fill_unused_direction;
 
   explicit LeAudioDeviceGroup(const int group_id)
       : group_id_(group_id),
@@ -120,6 +123,7 @@ public:
         audio_directions_(0),
         dsa_({DsaMode::DISABLED, false}),
         asymmetric_phy_for_unidirectional_cis_supported(true),
+        cig_fill_unused_direction(false),
         is_enabled_(true),
         transport_latency_c_to_p_us_(0),
         transport_latency_p_to_c_us_(0),
